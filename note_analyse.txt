@@ -1,0 +1,154 @@
+========================================================================
+NOTE D'ANALYSE EXPÉRIMENTALE
+IADATA708 — Algorithmic Fairness, Interpretability and Robustness
+Dataset : Pokec Social Network (Pokec-z)
+========================================================================
+
+1. PROTOCOLE EXPÉRIMENTAL
+--------------------------
+Données : sous-échantillon officiel Pokec-z (67 796 noeuds, ~500k arêtes),
+réseau social slovaque. Tâche : classification binaire de noeuds — prédire
+si un utilisateur renseigne une profession (I_am_working_in_field > 0).
+
+Attributs sensibles :
+  - Genre (gender, binaire : 1=homme, 0=femme, 49.4% hommes)
+  - Âge binarisé (age_group, seuil 30 ans, 16.9% seniors)
+
+Features : 275 attributs one-hot (hobbies, langues, préférences, etc.),
+sans inclusion des attributs sensibles pour éviter la fuite directe.
+
+Split : 60% train / 20% validation / 20% test, stratifié sur le label.
+Déséquilibre de classe : 8.1% positifs → correction par poids de classe
+inversement proportionnels à la fréquence (weight=[0.54, 5.88]).
+
+Hyperparamètres :
+  - GraphSAGE : 2 couches (275→64→2), agrégation mean, dropout=0.5,
+    lr=0.01, weight_decay=5e-4, 20 epochs
+  - Adversarial Debiasing : même architecture + adversaire (64→2),
+    λ=1.0, 20 epochs
+  - GNNExplainer : 5 epochs, node_mask uniquement
+
+Métriques :
+  - Performance : Accuracy, AUC-ROC
+  - Équité : Statistical Parity Difference (SPD = P(ŷ=1|s=1) - P(ŷ=1|s=0))
+             Equal Opportunity Difference (EOD = TPR(s=1) - TPR(s=0))
+  - Robustesse : bruit gaussien σ ∈ {0, 0.1, 0.3, 0.5} sur les features,
+    5 runs par niveau, résultats moyennés
+
+
+2. MODÈLE ET MÉTHODES
+-----------------------
+Baseline — GraphSAGE (Hamilton et al., 2017) :
+Réseau de neurones sur graphe inductif. Chaque noeud agrège les
+représentations de ses voisins (mean pooling) sur 2 couches de convolution.
+Choix justifié par sa robustesse sur les grands graphes échantillonnés
+et sa disponibilité dans PyTorch Geometric.
+
+Méthode d'équité — Adversarial Debiasing (in-training) :
+Un réseau adversaire est entraîné en parallèle pour prédire l'attribut
+sensible (genre) à partir des embeddings intermédiaires du modèle principal.
+Ce dernier est pénalisé s'il encode l'information de genre :
+    loss_total = loss_tâche − λ × loss_adversaire
+Le paramètre λ contrôle le compromis performance/équité.
+
+Interprétabilité — GNNExplainer (Ying et al., 2019) :
+Optimise un masque sur les features de chaque noeud pour identifier
+les attributs les plus influents dans la prédiction. Appliqué à un
+noeud homme et un noeud femme du test set pour comparer les décisions.
+
+Robustesse :
+Bruit gaussien centré de variance croissante injecté sur les features
+numériques à l'inférence. Permet de mesurer la stabilité des prédictions
+et des métriques d'équité sous perturbation contrôlée.
+
+
+3. RÉSULTATS CLÉS
+------------------
+Baseline GraphSAGE (test set) :
+
+  Attribut sensible : Genre
+    Accuracy : 0.4923  |  AUC-ROC : 0.7759
+    SPD      : +0.0164  |  EOD     : -0.0112
+
+  Attribut sensible : Âge
+    Accuracy : 0.4923  |  AUC-ROC : 0.7759
+    SPD      : -0.0603  |  EOD     : -0.0464
+
+L'AUC-ROC de 0.776 indique un pouvoir discriminant correct malgré
+une accuracy modeste (modèle encore en convergence à 20 epochs).
+Le biais lié à l'âge est nettement plus marqué (SPD=-0.060) que celui
+lié au genre (SPD=+0.016) : les seniors sont moins souvent prédits comme
+ayant une profession que les jeunes.
+
+GNNExplainer :
+Les features les plus importantes diffèrent selon le genre. Pour le noeud
+homme (idx=6) : sportovanie, tancovanie, marital_status_indicator,
+hair_color_indicator, relation_to_alcohol_indicator ressortent en tête.
+Pour le noeud femme (idx=13) : pets_indicator, completion_percentage,
+relation_to_casual_sex_indicator, relation_to_smoking_indicator, spanie
+dominent. Ces différences suggèrent que le modèle s'appuie sur des
+corrélats culturels genrés présents dans les profils slovaques.
+
+
+4. ANALYSE DU COMPROMIS PERFORMANCE / ÉQUITÉ / ROBUSTESSE
+-----------------------------------------------------------
+Comparaison Baseline vs Adversarial Debiasing (attribut : Genre) :
+
+               Baseline   Fair (λ=1.0)
+  Accuracy      0.4923       0.5151
+  AUC-ROC       0.7759       0.7455
+  SPD           0.0164       0.0151
+  EOD          -0.0112      -0.0152
+
+Le modèle fair réduit légèrement le SPD (0.0164 → 0.0151, -8%) mais
+au prix d'une perte d'AUC-ROC (0.776 → 0.746, -3 points). L'accuracy
+augmente marginalement (+2.3%), ce qui reflète une redistribution des
+prédictions plutôt qu'une amélioration réelle du modèle à ce stade.
+L'EOD se dégrade légèrement (-0.011 → -0.015), indiquant que la
+contrainte adversariale réduit le biais de parité statistique mais
+n'améliore pas uniformément l'égalité des chances.
+
+Robustesse sous bruit gaussien :
+
+  Baseline — σ=0 → σ=0.5 : AUC-ROC 0.776 → 0.768 (-1%), |SPD| stable
+  Fair     — σ=0 → σ=0.5 : AUC-ROC 0.746 → 0.743 (-0.4%), |SPD| stable
+
+Les deux modèles sont remarquablement stables sous bruit : l'AUC-ROC
+se dégrade très faiblement et les métriques d'équité (SPD, EOD) restent
+quasi-constantes. Le modèle fair est légèrement plus robuste en AUC-ROC
+sous perturbation forte (σ=0.5 : 0.743 vs 0.768 au départ, mais pente
+plus faible). La régularisation adversariale semble avoir un effet
+stabilisateur sur les représentations.
+
+Conclusion du compromis : l'adversarial debiasing réduit modestement
+le biais de genre au prix d'un coût en discrimination (AUC-ROC).
+Le biais lié à l'âge reste non traité — une extension naturelle serait
+d'appliquer la contrainte adversariale simultanément sur les deux
+attributs sensibles.
+
+
+5. LIMITES
+-----------
+- Nombre d'epochs réduit (20) pour contraintes computationnelles (CPU) :
+  les modèles ne sont pas pleinement convergés, ce qui limite
+  l'interprétation des métriques de performance absolues.
+
+- Fichier de relations Pokec-z non disponible au moment des tests
+  initiaux : les premiers runs ont été effectués sans arêtes (GraphSAGE
+  dégénère en MLP sans structure de graphe). Les résultats présentés
+  utilisent le fichier correct.
+
+- Déséquilibre de classe fort (8.1% positifs) : malgré le weighted loss,
+  l'accuracy reste instable sur les premières epochs. Des techniques
+  complémentaires (oversampling, focal loss) amélioreraient la stabilité.
+
+- GNNExplainer appliqué à 2 noeuds seulement : les conclusions sur
+  les différences de features entre genres ne sont pas statistiquement
+  généralisables. Une analyse sur un échantillon représentatif serait
+  nécessaire.
+
+- Le biais lié à l'âge (SPD=-0.060) est plus important que celui de
+  genre mais n'est pas ciblé par l'adversarial debiasing dans cette
+  implémentation.
+
+========================================================================
